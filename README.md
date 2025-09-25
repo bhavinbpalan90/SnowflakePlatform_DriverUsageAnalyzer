@@ -13,7 +13,7 @@ The **Driver Compliance Monitor** is a Streamlit application designed to help Sn
   - 🔴 Not Supported  
 - **KPI Dashboard:** Displays total drivers processed, counts by support status.
 - **Interactive Filters:** Filter results by driver name and support status.
-- **Business-Friendly Reporting:** Shows driver name, version, last accessed date, unique users, total sessions, minimum supported version, end-of-support version, recommended version, and compliance status.
+- **Summary and User Level Reporting:** Shows driver name, User, version, last accessed date, unique users, total sessions, minimum supported version, end-of-support version, recommended version, and compliance status.
 - **CSV Export:** Download the filtered compliance report as a CSV file.
 
 ---
@@ -23,6 +23,7 @@ The **Driver Compliance Monitor** is a Streamlit application designed to help Sn
 - Compliance teams monitoring driver support lifecycle.
 - IT teams planning upgrades for near end-of-support drivers.
 - Auditing driver usage trends for governance and security.
+- Enforcing users to use Supported Drivers
 
 ---
 
