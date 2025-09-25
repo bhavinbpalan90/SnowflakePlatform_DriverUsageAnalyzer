@@ -1,7 +1,10 @@
 import streamlit as st
 import pandas as pd
+from datetime import datetime
 
-# Attempt to get an active Snowflake session (works both in SiS and other Snowpark flows)
+# -------------------------------
+# Attempt to get active Snowflake session
+# -------------------------------
 try:
     from snowflake.snowpark.context import get_active_session
     session = get_active_session()
@@ -9,15 +12,52 @@ except Exception:
     from snowflake.snowpark import Session
     session = Session.builder.getOrCreate()
 
+# -------------------------------
+# Page Config
+# -------------------------------
 st.set_page_config(page_title="❄️🛡️ Driver Compliance Monitor 🚗", layout="wide")
-st.title("❄️🛡️ Driver Compliance Monitor 🚗")
 
-# helper - normalize columns to lowercase
+# -------------------------------
+# Fetch Snowflake Account Metadata
+# -------------------------------
+try:
+    account_info = session.sql("SELECT CURRENT_ACCOUNT() AS account_name, CURRENT_REGION() AS region").to_pandas().iloc[0]
+    ACCOUNT_NAME = account_info["ACCOUNT_NAME"]
+    REGION = account_info["REGION"]
+except Exception:
+    ACCOUNT_NAME = "Unknown"
+    REGION = "Unknown"
+
+CURRENT_DATE = datetime.now().strftime("%B %d, %Y")
+
+# -------------------------------
+# Header
+# -------------------------------
+st.markdown(
+    f"""
+    <div style="text-align:center; padding:10px 0;">
+        <h1 style="margin-bottom:0;">❄️🛡️ Driver Compliance Monitor 🚗</h1>
+        <p style="color:gray; font-size:16px; margin-top:4px;">
+            Account: <b>{ACCOUNT_NAME}</b> | Region: <b>{REGION}</b> | Date: <b>{CURRENT_DATE}</b>
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+# -------------------------------
+# Helper
+# -------------------------------
 def lower_cols(df):
     df.columns = [c.lower() for c in df.columns]
     return df
 
-# --- Fetch user history ---
+def safe_str(x):
+    return "" if x is None else str(x)
+
+# -------------------------------
+# Fetch User History
+# -------------------------------
 with st.spinner("Fetching recent driver usage (ACCOUNT_USAGE.SESSIONS)..."):
     user_history = session.sql("""
         SELECT CLIENT_APPLICATION_ID,
@@ -36,20 +76,23 @@ with st.spinner("Fetching recent driver usage (ACCOUNT_USAGE.SESSIONS)..."):
 
 user_history = lower_cols(user_history)
 if user_history.empty:
-    st.warning("No driver usage rows returned for the last day.")
+    st.warning("No driver usage rows returned for the last 30 days.")
     st.stop()
 
-# --- Fetch system version metadata ---
+# -------------------------------
+# Fetch System Driver Metadata
+# -------------------------------
 with st.spinner("Fetching system driver version metadata..."):
     min_versions = session.sql("""
         WITH x AS (SELECT PARSE_JSON(SYSTEM$CLIENT_VERSION_INFO()) info)
         SELECT
-          value:clientAppId::string AS DRIVER_NAME,
-          value:minimumNearingEndOfSupportVersion::string AS END_OF_SUPPORT,
-          value:minimumSupportedVersion::string AS MIN_SUPPORTED,
-          value:recommendedVersion::string AS RECOMMENDED_VERSION
+          value:clientAppId::string AS driver_name,
+          value:minimumNearingEndOfSupportVersion::string AS end_of_support,
+          value:minimumSupportedVersion::string AS min_supported,
+          value:recommendedVersion::string AS recommended_version
         FROM x, lateral flatten(input=> info)
     """).to_pandas()
+
 min_versions = lower_cols(min_versions)
 if 'driver_name' in min_versions.columns and 'driver' not in min_versions.columns:
     min_versions = min_versions.rename(columns={'driver_name': 'driver'})
@@ -57,7 +100,9 @@ if 'driver' not in min_versions.columns:
     st.warning("SYSTEM$CLIENT_VERSION_INFO() did not return expected driver metadata.")
     st.stop()
 
-# --- Merge user history + metadata ---
+# -------------------------------
+# Merge User + Driver Metadata
+# -------------------------------
 merged = pd.merge(user_history, min_versions, left_on='driver', right_on='driver', how='inner', sort=False)
 merged = merged[
     merged['min_supported'].notna() &
@@ -65,22 +110,21 @@ merged = merged[
     (merged['min_supported'].astype(str) != '') &
     (merged['end_of_support'].astype(str) != '')
 ].reset_index(drop=True)
+
 if merged.empty:
     st.warning("No drivers found that have metadata.")
     st.stop()
 
-# --- Initialize session state to cache Cortex results ---
+# -------------------------------
+# Cortex Classification (Cache in Session State)
+# -------------------------------
 if 'driver_results' not in st.session_state:
     st.session_state.driver_results = []
 
-# --- Process Cortex only if not cached ---
 if not st.session_state.driver_results:
     status_placeholder = st.empty()
     progress_bar = st.progress(0)
     results = []
-
-    def safe_str(x):
-        return "" if x is None else str(x)
 
     with st.spinner("Classifying drivers with Cortex..."):
         total = len(merged)
@@ -95,11 +139,9 @@ if not st.session_state.driver_results:
             end_of_support = safe_str(row.get('end_of_support'))
             recommended_version = safe_str(row.get('recommended_version'))
 
-            # ---- Correct Cortex prompt ----
             prompt = (
                 "You are a helpful AI assistant that will only respond with a single word. "
                 "Determine the support status of a driver version. "
-                "You will be given:\n"
                 f"- DRIVER_USED: {client_app}\n"
                 f"- MINIMUM_VERSION: {min_supported}\n"
                 f"- END_OF_SUPPORT: {end_of_support}\n"
@@ -109,7 +151,6 @@ if not st.session_state.driver_results:
                 "2. If DRIVER_USED >= MINIMUM_VERSION and <= END_OF_SUPPORT → respond 'Near End of Support'.\n"
                 "3. If DRIVER_USED > END_OF_SUPPORT → respond 'Supported'.\n"
                 "Output exactly one word from: Supported, Not Supported, Near End of Support. "
-                "Do not include any explanation or extra text."
             )
             prompt_escaped = prompt.replace("'", "''")
             sql = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('openai-gpt-4.1', '{prompt_escaped}') AS result"
@@ -120,7 +161,7 @@ if not st.session_state.driver_results:
             except:
                 ai_resp = "Error"
 
-            status_placeholder.info(f"Last processed ({i+1}/{total}): **{client_app}** → **{ai_resp}**")
+            status_placeholder.info(f"Processing {i+1}/{total}: {client_app} → {ai_resp}")
 
             results.append({
                 "client_application_id": client_app,
@@ -139,10 +180,10 @@ if not st.session_state.driver_results:
 
     st.session_state.driver_results = results
 
-# --- Use cached results ---
+# -------------------------------
+# Use Cached Results
+# -------------------------------
 results_df = pd.DataFrame(st.session_state.driver_results)
-
-# --- Add emoji mapping ---
 emoji_map = {
     "Supported": "🟢 Supported",
     "Not Supported": "🔴 Not Supported",
@@ -152,7 +193,9 @@ emoji_map = {
 }
 results_df['status'] = results_df['ai_response'].map(lambda x: emoji_map.get(x, f"⚪️ {x}"))
 
-# --- KPIs ---
+# -------------------------------
+# KPI Section
+# -------------------------------
 total_processed = len(results_df)
 supported_count = (results_df['ai_response'] == "Supported").sum()
 near_end_count = (results_df['ai_response'] == "Near End of Support").sum()
@@ -160,62 +203,55 @@ not_supported_count = (results_df['ai_response'] == "Not Supported").sum()
 
 st.divider()
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("Drivers processed", total_processed)
-k2.metric("Supported", supported_count)
-k3.metric("Near End of Support", near_end_count)
-k4.metric("Not Supported", not_supported_count)
-
+k1.metric("Drivers Processed", total_processed)
+k2.metric("🟢 Supported", supported_count)
+k3.metric("🟠 Near End of Support", near_end_count)
+k4.metric("🔴 Not Supported", not_supported_count)
 st.divider()
 
-# --- Filters ---
-st.sidebar.header("Filters")
-drivers_list = sorted(results_df['driver'].dropna().unique())
-selected_drivers = st.sidebar.multiselect("Driver", drivers_list, default=drivers_list)
-status_options = sorted(results_df['ai_response'].dropna().unique())
-selected_status = st.sidebar.multiselect("Status", status_options, default=status_options)
+# -------------------------------
+# Filters
+# -------------------------------
+st.subheader("🔎 Filter Results")
+col1, col2 = st.columns([2,2])
+with col1:
+    drivers_list = sorted(results_df['driver'].dropna().unique())
+    selected_drivers = st.multiselect("Select Driver", drivers_list, default=drivers_list)
+with col2:
+    status_options = sorted(results_df['ai_response'].dropna().unique())
+    selected_status = st.multiselect("Select Status", status_options, default=status_options)
 
 filtered = results_df[
     (results_df['driver'].isin(selected_drivers)) &
     (results_df['ai_response'].isin(selected_status))
 ].reset_index(drop=True)
 
-# --- Driver-level table ---
-display_cols = [
-    "driver",
-    "version",
-    "total_unique_users",
-    "total_sessions",
-    "min_supported",
-    "end_of_support",
-    "recommended_version",
-    "status"  # emoji
-]
-display_cols = [c for c in display_cols if c in filtered.columns]
+# -------------------------------
+# Business-Friendly Columns
+# -------------------------------
+display_cols = {
+    "driver": "Driver Name",
+    "version": "Driver Version",
+    "last_accessed_date": "Last Accessed Date",
+    "total_unique_users": "Unique Users",
+    "total_sessions": "Total Sessions",
+    "min_supported": "Minimum Supported Version",
+    "end_of_support": "End of Support Version",
+    "recommended_version": "Recommended Version",
+    "status": "Support Status"
+}
+filtered = filtered.rename(columns=display_cols)
 
+# -------------------------------
+# Compliance Report
+# -------------------------------
 st.subheader("⚙️ Driver Version Compliance Report")
-st.dataframe(filtered[display_cols], use_container_width=True)
+st.dataframe(filtered[list(display_cols.values())], use_container_width=True)
 
-csv = filtered[display_cols].to_csv(index=False).encode("utf-8")
+# -------------------------------
+# CSV Download
+# -------------------------------
+csv = filtered[list(display_cols.values())].to_csv(index=False).encode("utf-8")
 st.download_button("📥 Download Report as CSV", data=csv, file_name="driver_status_report.csv", mime="text/csv")
-
-# --- Expander for Not Supported users ---
-with st.expander("Users on Not Supported drivers (details)"):
-    not_supported_df = results_df[results_df['ai_response'] == "Not Supported"]
-    if not not_supported_df.empty:
-        cols = [
-            "client_application_id",
-            "driver",
-            "version",
-            "last_accessed_date",
-            "total_sessions",
-            "total_unique_users",
-            "min_supported",
-            "end_of_support",
-            "recommended_version",
-            "status"
-        ]
-        st.dataframe(not_supported_df[cols].reset_index(drop=True), use_container_width=True)
-    else:
-        st.write("No users found on Not Supported drivers.")
 
 st.success("Processing complete ✅")
