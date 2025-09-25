@@ -268,17 +268,24 @@ csv = compliance_df[list(display_cols.values())].to_csv(index=False).encode("utf
 st.download_button("📥 Download Compliance Report", data=csv, file_name="driver_status_report.csv", mime="text/csv")
 
 # -------------------------------
-# User Details
+# User Details with Driver Status
 # -------------------------------
 st.subheader("👤 User Details")
 filtered_client_ids = filtered['client_application_id'].unique()
 user_details = user_sessions[user_sessions['client_application_id'].isin(filtered_client_ids)]
+
+# Map driver status emoji from results_df
+status_map = results_df.set_index('client_application_id')['status'].to_dict()
+user_details['driver_status'] = user_details['client_application_id'].map(status_map)
+
 user_display = user_details.rename(columns={
     "client_application_id": "Client Application ID",
     "user_name": "User Name",
     "session_count": "Session Count",
-    "last_accessed_date": "Last Accessed Date"
+    "last_accessed_date": "Last Accessed Date",
+    "driver_status": "Driver Status"
 })
+
 user_display = user_display.sort_values(by='Session Count', ascending=False).reset_index(drop=True)
 
 st.dataframe(user_display, use_container_width=True)
